@@ -1,0 +1,135 @@
+# 📝 Word Document Metadata & Track Changes Cleaner
+### Word 文档 (.docx) 核心元数据清洗与修订痕迹平滑仿真工具
+
+[![Author](https://img.shields.io/badge/Author-endangered--xiezhi-blue.svg)](https://github.com/endangered-xiezhi)
+[![Python](https://img.shields.io/badge/Python-3.8+-green.svg)](https://www.python.org/)
+[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey.svg)]()
+
+> **项目主页 / GitHub**：[https://github.com/endangered-xiezhi](https://github.com/endangered-xiezhi)  
+> 一款轻量、专业且零外部依赖的 Word (`.docx`) 隐私脱敏工具。支持一键侦测并修改隐藏元数据（作者、上次保存者、修订版本号、编辑总时间、打印时间、正文痕迹保留修订人及平滑仿真时间戳）。
+
+---
+
+## ✨ 核心特性
+
+- 🔍 **全量隐藏属性侦测（--inspect）**：一键透视 Word 属性中的作者、上次保存者、修订版本、编辑总时长（分钟）、正文所有修改者名单与时间跨度。
+- ⚡ **智能破绽平抑**：
+  - 自动修复**编辑时间总计异常偏大**（如数千分钟）。
+  - 重置**修订版本号过高**（如几十次修订降为 2~3 次）。
+  - 统一**上次保存者与作者**身份一致性。
+- 🖋️ **正文修订痕迹（Track Changes）与批注修改**：
+  - 批量将正文中的所有修改人姓名无损替换为指定新名字。
+  - 支持批注作者与缩写（Initials）同步修改。
+  - 同步清洗 Office 365 协作人物清单（`people.xml`）。
+- ⏳ **独家：自然平滑时间区间仿真**：
+  - 支持设置修订起止时间段，脚本自动在区间内按先后顺序**平滑随机递增生成时间戳**，避免“全文几十处修改均在同一秒”的机械破绽。
+- 🍏 **文件系统时间对齐**：同步修改本地操作系统（macOS Finder / Windows 资源管理器）的文件创建与修改时间（mtime）。
+- 💻 **双模式交互**：提供现代化苹果风格的 **Web 可视化交互前端** 与 **纯标准库 CLI 命令行工具**。
+- 🔒 **100% 本地安全**：所有文件均在本地内存与临时目录解构处理，绝不上传任何外部网络。
+
+---
+
+## 📁 目录结构
+
+```text
+├── docx_metadata_editor.py        # 核心清洗引擎与 CLI 命令行工具（零外部依赖）
+├── docx_web_ui.py                 # 可视化 Web 交互前端（内嵌现代化 UI，拖拽即用）
+├── 启动Word元数据修改器.command      # macOS 一键双击启动脚本
+├── README.md                      # 项目说明文档
+└── .gitignore                     # Git 忽略文件
+```
+
+---
+
+## 🚀 快速启动
+
+### 方式一：Web 可视化交互前端（推荐）
+
+#### macOS 用户
+在 Finder 中直接**双击**运行：
+```text
+启动Word元数据修改器.command
+```
+系统会自动启动本地轻量服务并在默认浏览器中弹出操作界面。
+
+#### 命令行启动
+```bash
+python3 docx_web_ui.py
+```
+终端会输出如下提示并自动打开浏览器（默认端口 `http://127.0.0.1:5050`）：
+```text
+=================================================================
+🚀 Word 交互式元数据与修订痕迹清洗工具正在启动...
+🔗 Project / Author : https://github.com/endangered-xiezhi
+🌐 本地访问地址      : http://127.0.0.1:5050
+💡 正在为您自动打开默认浏览器，按 Ctrl + C 可退出服务
+=================================================================
+```
+
+**操作步骤**：
+1. 将 `.docx` 文件拖入页面上传框；
+2. 左侧即刻显示当前文档的原始隐藏元数据（异常数据自动高亮标记）；
+3. 点击右侧 **`⚡ 填入合理推荐值`** 或手动微调作者、时间等；
+4. 点击 **`🚀 立即导出并下载修改后的 Word 文档`** 即可。
+
+---
+
+### 方式二：CLI 命令行模式
+
+#### 1. 仅侦测查看当前元数据（不修改文件）
+```bash
+python3 docx_metadata_editor.py your_document.docx --inspect
+```
+
+#### 2. 一键批量修改与平滑仿真
+```bash
+python3 docx_metadata_editor.py your_document.docx \
+  -a "新作者" \
+  -m "新作者" \
+  --rev-author "新作者" \
+  --total-time 120 \
+  --rev-num 3 \
+  --created "2026-10-15 09:00:00" \
+  --modified "2026-10-18 08:30:00" \
+  --rev-start "2026-10-18 09:00:00" \
+  --rev-end "2026-10-18 11:30:00"
+```
+
+#### 3. 命令行常用参数速查表
+
+| 参数 | 说明 | 示例 |
+| :--- | :--- | :--- |
+| `--inspect` | 仅查看隐藏元数据与修订人员，不修改 | `--inspect` |
+| `-a`, `--author` | 文档创建作者 (Creator) | `-a "张三"` |
+| `-m`, `--modifier` | 上次保存者 (Last Modified By) | `-m "张三"` |
+| `--rev-author` | 正文痕迹的修订人姓名 (Track Changes) | `--rev-author "张三"` |
+| `--old-author` | 可选：仅替换指定的旧修订人名字 | `--old-author "旧名字"` |
+| `--comment-author`| 批注作者姓名 | `--comment-author "审阅人"` |
+| `--comment-initials`| 批注作者缩写 | `--comment-initials "ZS"` |
+| `--total-time` | 编辑总时长（分钟） | `--total-time 120` |
+| `--rev-num` | 修订版本号 | `--rev-num 2` |
+| `--created` | 文档创建时间 | `--created "2026-10-15 08:00:00"` |
+| `--modified` | 最后修改时间 | `--modified "2026-10-18 10:30:00"` |
+| `--rev-date` | 将所有修订时间统一为固定时间 | `--rev-date "2026-10-18 09:00:00"` |
+| `--rev-start` / `--rev-end` | 修订时间区间（自然平滑仿真递增） | `--rev-start "..." --rev-end "..."` |
+
+---
+
+## 🛠️ 底层技术原理
+
+Word (`.docx`) 本质上是一个遵循 OpenXML 标准的 ZIP 压缩包：
+1. **核心元数据**：存储于 `docProps/core.xml` 中的 `<dc:creator>`, `<cp:lastModifiedBy>`, `<cp:revision>`, `<dcterms:created>` 等标签；
+2. **统计属性**：存储于 `docProps/app.xml` 中的 `<TotalTime>`（编辑总分钟数）、`<Company>` 等；
+3. **修订痕迹 (Track Changes)**：存储于 `word/document.xml`，所有插入 `<w:ins>` 与删除 `<w:del>` 均由 `w:author` 和 `w:date` 属性直接决定渲染结果；
+4. **协同信息**：存储于 `word/people.xml`，记录 Microsoft 365 账号标记；
+5. **批注信息**：存储于 `word/comments.xml`。
+
+本工具通过 Python 标准库在内存中精准匹配并替换对应的 XML 属性节点，既杜绝了格式损坏的风险，又实现了完全彻底的脱敏。
+
+---
+
+## 📄 开源许可证
+
+本项目基于 [MIT License](LICENSE) 开源协议发布。  
+GitHub 主页：[https://github.com/endangered-xiezhi](https://github.com/endangered-xiezhi)

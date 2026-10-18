@@ -1,0 +1,513 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Word 文档 (.docx) 全能元数据与痕迹修改工具
+==============================================================================
+Project / Author : https://github.com/endangered-xiezhi
+License          : MIT License
+==============================================================================
+
+功能支持：
+1. 文档核心元数据修改：作者、上次保存者、修订号、创建时间、修改时间、打印时间、标题、单位等。
+2. 统计信息修改：编辑时间总计（分钟数，智能平抑异常过大的编辑时长）。
+3. 修订与痕迹修改：批量修改修订人姓名（Track Changes）、修订时间（支持固定时间或智能自然时间区间递增分布）。
+4. 批注信息修改：修改批注作者、批注者缩写、批注时间。
+5. 协同信息清理：同步修改 Office 365 / 新版 Word 的 people.xml 协作者名单。
+6. 本地文件系统时间对齐：同步修改 macOS/Windows 本地文件的 ctime/mtime，与 Finder/文件管理器完全对齐。
+7. 文档元数据查看（--inspect）：在修改前一键查看文档当前所有隐藏元数据。
+
+依赖：仅使用 Python 标准库，无需 pip 安装任何第三方包。
+"""
+
+import os
+import sys
+import re
+import shutil
+import zipfile
+import argparse
+from datetime import datetime, timedelta
+import random
+
+# 水印信息
+WATERMARK_URL = "https://github.com/endangered-xiezhi"
+
+# ==================== 时间格式化工具 ====================
+
+def parse_datetime(dt_str):
+    """支持多种常见时间格式输入，解析为 datetime 对象"""
+    if not dt_str:
+        return None
+    dt_str = dt_str.strip()
+    clean_str = dt_str.replace("Z", "")
+    formats = [
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d",
+        "%Y/%m/%d %H:%M:%S",
+        "%Y/%m/%d %H:%M",
+        "%Y/%m/%d",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M",
+        "%Y-%m-%dT%H:%M:%SZ",
+        "%Y年%m月%d日 %H:%M:%S",
+        "%Y年%m月%d日 %H:%M",
+    ]
+    for fmt in formats:
+        try:
+            return datetime.strptime(clean_str, fmt)
+        except ValueError:
+            continue
+    raise ValueError(f"无法识别的时间格式: {dt_str}。建议格式如: '2026-10-18 09:30:00'")
+
+def format_w3cdtf(dt):
+    """格式化为 Office 内部使用的 W3CDTF / ISO 8601 UTC 字符串"""
+    if dt is None:
+        return None
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# ==================== XML 辅助更新函数 ====================
+
+def update_xml_tag(xml_str, tag, new_val, root_close_tag=None):
+    """更新 XML 中指定闭合标签的值；若不存在且提供了根闭合标签，则自动插入"""
+    if new_val is None:
+        return xml_str
+    
+    val_escaped = str(new_val).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    
+    pattern = rf'(<{tag}[^>]*>)(.*?)(<\/{tag}>)'
+    if re.search(pattern, xml_str):
+        return re.sub(pattern, rf'\g<1>{val_escaped}\g<3>', xml_str)
+    elif root_close_tag and root_close_tag in xml_str:
+        insert_str = f'<{tag}>{val_escaped}</{tag}>'
+        return xml_str.replace(root_close_tag, f'{insert_str}{root_close_tag}')
+    return xml_str
+
+def get_xml_tag_value(xml_str, tag):
+    """获取 XML 中指定标签的文本内容"""
+    match = re.search(rf'<{tag}[^>]*>(.*?)<\/{tag}>', xml_str)
+    return match.group(1).strip() if match else None
+
+
+# ==================== 查看与提取文档元数据 ====================
+
+def get_docx_info(docx_path):
+    """提取 docx 当前的全部元数据、统计属性及修订/批注人员，返回结构化字典"""
+    if not os.path.exists(docx_path):
+        return None
+
+    info = {
+        "filename": os.path.basename(docx_path),
+        "title": None,
+        "creator": None,
+        "last_modified_by": None,
+        "revision": None,
+        "created": None,
+        "modified": None,
+        "printed": None,
+        "total_time": None,
+        "company": None,
+        "application": None,
+        "rev_authors": [],
+        "rev_count": 0,
+        "rev_earliest": None,
+        "rev_latest": None,
+        "comment_authors": [],
+        "people": []
+    }
+
+    try:
+        with zipfile.ZipFile(docx_path, 'r') as z:
+            namelist = set(z.namelist())
+
+            # 1. 核心属性 (core.xml)
+            if 'docProps/core.xml' in namelist:
+                core_xml = z.read('docProps/core.xml').decode('utf-8', errors='ignore')
+                info["title"] = get_xml_tag_value(core_xml, 'dc:title')
+                info["creator"] = get_xml_tag_value(core_xml, 'dc:creator')
+                info["last_modified_by"] = get_xml_tag_value(core_xml, 'cp:lastModifiedBy')
+                info["revision"] = get_xml_tag_value(core_xml, 'cp:revision')
+                info["created"] = get_xml_tag_value(core_xml, 'dcterms:created')
+                info["modified"] = get_xml_tag_value(core_xml, 'dcterms:modified')
+                info["printed"] = get_xml_tag_value(core_xml, 'cp:lastPrinted')
+
+            # 2. 统计信息 (app.xml)
+            if 'docProps/app.xml' in namelist:
+                app_xml = z.read('docProps/app.xml').decode('utf-8', errors='ignore')
+                info["total_time"] = get_xml_tag_value(app_xml, 'TotalTime')
+                info["company"] = get_xml_tag_value(app_xml, 'Company')
+                info["application"] = get_xml_tag_value(app_xml, 'Application')
+
+            # 3. 修订痕迹 (Track Changes)
+            rev_authors = set()
+            rev_dates = []
+            for name in namelist:
+                if name.startswith('word/') and name.endswith('.xml'):
+                    content = z.read(name).decode('utf-8', errors='ignore')
+                    authors = re.findall(r'<w:[^>]*?\bw:author="([^"]*)"', content)
+                    dates = re.findall(r'<w:[^>]*?\bw:date="([^"]*)"', content)
+                    rev_authors.update(authors)
+                    rev_dates.extend(dates)
+
+            info["rev_authors"] = sorted(list(rev_authors))
+            info["rev_count"] = len(rev_dates)
+            if rev_dates:
+                info["rev_earliest"] = min(rev_dates)
+                info["rev_latest"] = max(rev_dates)
+
+            # 4. 批注 (Comments)
+            if 'word/comments.xml' in namelist:
+                cmt_xml = z.read('word/comments.xml').decode('utf-8', errors='ignore')
+                info["comment_authors"] = sorted(list(set(re.findall(r'w:author="([^"]*)"', cmt_xml))))
+
+            # 5. Office 365 协作人 (people.xml)
+            if 'word/people.xml' in namelist:
+                people_xml = z.read('word/people.xml').decode('utf-8', errors='ignore')
+                info["people"] = sorted(list(set(re.findall(r'w15:author="([^"]*)"', people_xml))))
+
+        return info
+    except Exception as e:
+        print(f"[错误] 解析文档元数据失败: {e}")
+        return None
+
+def inspect_docx(docx_path):
+    """扫描并打印 docx 当前的全部元数据、统计属性及修订/批注人员名单"""
+    info = get_docx_info(docx_path)
+    if not info:
+        print(f"[错误] 无法读取文件: {docx_path}")
+        return
+
+    print("=" * 65)
+    print(f"📄 文档元数据侦测报告: {info['filename']}")
+    print(f"🔗 Project: {WATERMARK_URL}")
+    print("=" * 65)
+    print("\n【基本属性 (docProps/core.xml)】")
+    print(f"  • 标题 (Title):         {info['title'] or '(未设置)'}")
+    print(f"  • 作者 (Creator):       {info['creator'] or '(未设置)'}")
+    print(f"  • 上次保存者 (Modifier): {info['last_modified_by'] or '(未设置)'}")
+    print(f"  • 修订号 (Revision):    {info['revision'] or '(未设置)'}")
+    print(f"  • 创建时间 (Created):   {info['created'] or '(未设置)'}")
+    print(f"  • 修改时间 (Modified):  {info['modified'] or '(未设置)'}")
+    print(f"  • 打印时间 (Printed):   {info['printed'] or '(未设置)'}")
+
+    print("\n【统计信息 (docProps/app.xml)】")
+    print(f"  • 编辑时间总计 (TotalTime): {info['total_time'] or '(未记录)'} 分钟")
+    print(f"  • 单位 / 公司 (Company):   {info['company'] or '(未设置)'}")
+    print(f"  • 制作应用程序 (App):       {info['application'] or '(未记录)'}")
+
+    print("\n【修订痕迹 (Track Changes)】")
+    if info['rev_authors']:
+        print(f"  • 检测到的修订人列表 ({len(info['rev_authors'])} 人): {', '.join(info['rev_authors'])}")
+        print(f"  • 检测到的修订标记总数: {info['rev_count']} 处")
+        if info['rev_earliest']:
+            print(f"  • 最早修订时间: {info['rev_earliest']}")
+            print(f"  • 最晚修订时间: {info['rev_latest']}")
+    else:
+        print("  • 未检测到带有作者属性的修订痕迹")
+
+    print("\n【批注 (Comments)】")
+    if info['comment_authors']:
+        print(f"  • 批注者列表: {', '.join(info['comment_authors'])}")
+    else:
+        print("  • 无批注或未记录批注者")
+
+    if info['people']:
+        print("\n【Office 365 协作人 (people.xml)】")
+        print(f"  • 登记的协作人: {', '.join(info['people'])}")
+
+    print("=" * 65)
+
+
+# ==================== 核心修改逻辑 ====================
+
+def modify_docx_metadata(
+    input_path,
+    output_path=None,
+    # 基本元数据
+    creator=None,
+    last_modified_by=None,
+    revision_num=None,
+    created_time=None,
+    modified_time=None,
+    printed_time=None,
+    title=None,
+    # 统计信息
+    total_time_minutes=None,
+    company=None,
+    manager=None,
+    # 修订与批注作者
+    target_old_rev_author=None,
+    new_rev_author=None,
+    new_comment_author=None,
+    new_comment_initials=None,
+    # 修订时间
+    fixed_rev_date=None,
+    rev_date_start=None,
+    rev_date_end=None,
+    # 系统时间同步
+    sync_fs_time=True
+):
+    """对 docx 进行全面的元数据与痕迹修改，保证格式无损"""
+    if not os.path.exists(input_path):
+        raise FileNotFoundError(f"找不到源文件: {input_path}")
+
+    if output_path is None:
+        base, ext = os.path.splitext(input_path)
+        output_path = f"{base}_modified{ext}"
+
+    w3c_created = format_w3cdtf(parse_datetime(created_time)) if created_time else None
+    w3c_modified = format_w3cdtf(parse_datetime(modified_time)) if modified_time else None
+    w3c_printed = format_w3cdtf(parse_datetime(printed_time)) if printed_time else None
+    w3c_fixed_rev = format_w3cdtf(parse_datetime(fixed_rev_date)) if fixed_rev_date else None
+    
+    dt_rev_start = parse_datetime(rev_date_start) if rev_date_start else None
+    dt_rev_end = parse_datetime(rev_date_end) if rev_date_end else None
+
+    temp_output = output_path + ".tmp"
+    changes_summary = []
+
+    with zipfile.ZipFile(input_path, 'r') as zin:
+        with zipfile.ZipFile(temp_output, 'w', compression=zin.compression) as zout:
+            
+            total_rev_date_tags = 0
+            if dt_rev_start and dt_rev_end:
+                for name in zin.namelist():
+                    if name.startswith('word/') and name.endswith('.xml'):
+                        c = zin.read(name).decode('utf-8', errors='ignore')
+                        total_rev_date_tags += len(re.findall(r'<w:[^>]*?\bw:date="([^"]*)"', c))
+
+            current_date_tag_index = [0]
+
+            for item in zin.infolist():
+                content = zin.read(item.filename)
+
+                # 1. 处理 docProps/core.xml (作者、修改者、修订号、创建修改时间)
+                if item.filename == 'docProps/core.xml':
+                    xml_str = content.decode('utf-8', errors='ignore')
+                    root_close = '</cp:coreProperties>'
+
+                    if creator is not None:
+                        xml_str = update_xml_tag(xml_str, 'dc:creator', creator, root_close)
+                        changes_summary.append(f"作者 (creator) -> {creator}")
+                    if last_modified_by is not None:
+                        xml_str = update_xml_tag(xml_str, 'cp:lastModifiedBy', last_modified_by, root_close)
+                        changes_summary.append(f"上次保存者 (lastModifiedBy) -> {last_modified_by}")
+                    if revision_num is not None:
+                        xml_str = update_xml_tag(xml_str, 'cp:revision', str(revision_num), root_close)
+                        changes_summary.append(f"修订号 (revision) -> {revision_num}")
+                    if w3c_created is not None:
+                        xml_str = re.sub(r'(<dcterms:created[^>]*>)(.*?)(<\/dcterms:created>)', rf'\g<1>{w3c_created}\g<3>', xml_str)
+                        changes_summary.append(f"创建时间 (created) -> {w3c_created}")
+                    if w3c_modified is not None:
+                        xml_str = re.sub(r'(<dcterms:modified[^>]*>)(.*?)(<\/dcterms:modified>)', rf'\g<1>{w3c_modified}\g<3>', xml_str)
+                        changes_summary.append(f"修改时间 (modified) -> {w3c_modified}")
+                    if w3c_printed is not None:
+                        xml_str = update_xml_tag(xml_str, 'cp:lastPrinted', w3c_printed, root_close)
+                        changes_summary.append(f"打印时间 (lastPrinted) -> {w3c_printed}")
+                    if title is not None:
+                        xml_str = update_xml_tag(xml_str, 'dc:title', title, root_close)
+                        changes_summary.append(f"文档标题 (title) -> {title}")
+
+                    content = xml_str.encode('utf-8')
+
+                # 2. 处理 docProps/app.xml (编辑总时间、公司)
+                elif item.filename == 'docProps/app.xml':
+                    xml_str = content.decode('utf-8', errors='ignore')
+                    root_close = '</Properties>'
+
+                    if total_time_minutes is not None:
+                        xml_str = update_xml_tag(xml_str, 'TotalTime', str(total_time_minutes), root_close)
+                        changes_summary.append(f"编辑时间总计 (TotalTime) -> {total_time_minutes} 分钟")
+                    if company is not None:
+                        xml_str = update_xml_tag(xml_str, 'Company', company, root_close)
+                        changes_summary.append(f"所属单位 (Company) -> {company}")
+                    if manager is not None:
+                        xml_str = update_xml_tag(xml_str, 'Manager', manager, root_close)
+                        changes_summary.append(f"主管 (Manager) -> {manager}")
+
+                    content = xml_str.encode('utf-8')
+
+                # 3. 处理 word/ 下的所有 xml (document.xml, comments.xml, header/footer 等)
+                elif item.filename.startswith('word/') and item.filename.endswith('.xml'):
+                    xml_str = content.decode('utf-8', errors='ignore')
+                    modified_xml = False
+
+                    # A. 修改修订人
+                    target_author = new_rev_author
+                    if target_author is not None:
+                        if target_old_rev_author:
+                            pattern = rf'(<w:[^>]*?\bw:author="){re.escape(target_old_rev_author)}(")'
+                            if re.search(pattern, xml_str):
+                                xml_str = re.sub(pattern, rf'\g<1>{target_author}\g<2>', xml_str)
+                                modified_xml = True
+                        else:
+                            pattern = r'(<w:[^>]*?\bw:author=")[^"]*(")'
+                            if re.search(pattern, xml_str):
+                                xml_str = re.sub(pattern, rf'\g<1>{target_author}\g<2>', xml_str)
+                                modified_xml = True
+
+                    # B. 单独修改批注作者与缩写 (comments.xml)
+                    if 'comments' in item.filename:
+                        if new_comment_author is not None:
+                            xml_str = re.sub(r'(<w:comment[^>]*?\bw:author=")[^"]*(")', rf'\g<1>{new_comment_author}\g<2>', xml_str)
+                            modified_xml = True
+                        if new_comment_initials is not None:
+                            xml_str = re.sub(r'(<w:comment[^>]*?\bw:initials=")[^"]*(")', rf'\g<1>{new_comment_initials}\g<2>', xml_str)
+                            modified_xml = True
+
+                    # C. 修改修订/批注时间
+                    if w3c_fixed_rev is not None:
+                        pattern = r'(<w:[^>]*?\bw:date=")[^"]*(")'
+                        if re.search(pattern, xml_str):
+                            xml_str = re.sub(pattern, rf'\g<1>{w3c_fixed_rev}\g<2>', xml_str)
+                            modified_xml = True
+                    elif dt_rev_start and dt_rev_end and total_rev_date_tags > 0:
+                        total_span = (dt_rev_end - dt_rev_start).total_seconds()
+                        
+                        def replace_date_smooth(match):
+                            prefix = match.group(1)
+                            suffix = match.group(2)
+                            idx = current_date_tag_index[0]
+                            current_date_tag_index[0] += 1
+                            
+                            ratio = (idx + 1) / (total_rev_date_tags + 1)
+                            jitter = random.uniform(-25, 25)
+                            sec_offset = max(0, min(total_span, (total_span * ratio) + jitter))
+                            current_dt = dt_rev_start + timedelta(seconds=sec_offset)
+                            return f"{prefix}{format_w3cdtf(current_dt)}{suffix}"
+
+                        pattern = r'(<w:[^>]*?\bw:date=")[^"]*(")'
+                        if re.search(pattern, xml_str):
+                            xml_str = re.sub(pattern, replace_date_smooth, xml_str)
+                            modified_xml = True
+
+                    # D. 处理 word/people.xml (Office 365 登记信息)
+                    if item.filename == 'word/people.xml' and target_author:
+                        if target_old_rev_author:
+                            xml_str = re.sub(rf'(w15:author="){re.escape(target_old_rev_author)}(")', rf'\g<1>{target_author}\g<2>', xml_str)
+                        else:
+                            xml_str = re.sub(r'(w15:author=")[^"]*(")', rf'\g<1>{target_author}\g<2>', xml_str)
+                        modified_xml = True
+
+                    if modified_xml:
+                        content = xml_str.encode('utf-8')
+
+                # 写回压缩包
+                zout.writestr(item, content)
+
+    # 替换目标文件
+    if os.path.exists(output_path):
+        os.remove(output_path)
+    shutil.move(temp_output, output_path)
+
+    # 同步修改本地文件系统的 mtime / atime（匹配 Finder 中的显示）
+    if sync_fs_time:
+        sync_target_time = None
+        if modified_time:
+            sync_target_time = parse_datetime(modified_time)
+        elif created_time:
+            sync_target_time = parse_datetime(created_time)
+        
+        if sync_target_time:
+            ts = sync_target_time.timestamp()
+            os.utime(output_path, (ts, ts))
+            changes_summary.append(f"本地文件系统修改时间 (mtime) -> {sync_target_time.strftime('%Y-%m-%d %H:%M:%S')}")
+
+    print("\n✅ 修改完成！生成文件:", output_path)
+    print("【变更清单】")
+    for item in set(changes_summary):
+        print(f"  ✓ {item}")
+
+    return output_path
+
+
+# ==================== 命令行交互入口 ====================
+
+def main():
+    parser = argparse.ArgumentParser(
+        description=f"Word 文档 (.docx) 元数据、作者、修订痕迹与时间批量清洗工具\nProject: {WATERMARK_URL}",
+        formatter_class=argparse.RawTextHelpFormatter
+    )
+    parser.add_argument("file", nargs="?", help="要处理的 docx 文件路径")
+    parser.add_argument("-o", "--output", help="输出的新文件路径（默认保存为 原文件名_modified.docx）")
+    parser.add_argument("--inspect", action="store_true", help="仅查看文档当前隐藏元数据与修订人员名单，不修改文件")
+    
+    # 核心属性
+    parser.add_argument("-a", "--author", help="修改文档创建作者 (Creator)")
+    parser.add_argument("-m", "--modifier", help="修改上次保存者 (Last Modified By)")
+    parser.add_argument("--rev-num", type=int, help="修改修订版本号 (Revision number，如 1, 2, 3)")
+    parser.add_argument("--created", help="修改创建时间 (例如 '2026-10-18 08:30:00')")
+    parser.add_argument("--modified", help="修改保存时间 (例如 '2026-10-18 10:15:00')")
+    parser.add_argument("--printed", help="修改打印时间")
+    parser.add_argument("--title", help="修改文档标题")
+    
+    # 统计信息
+    parser.add_argument("--total-time", type=int, help="修改编辑时间总计（分钟数，如解决异常偏大的编辑时长）")
+    parser.add_argument("--company", help="修改所属单位/公司名称")
+    
+    # 修订痕迹与批注
+    parser.add_argument("--rev-author", help="将修订痕迹的作者统一修改为此人")
+    parser.add_argument("--old-author", help="[可选] 仅替换指定的旧修订人名字（配合 --rev-author 使用）")
+    parser.add_argument("--comment-author", help="修改批注作者名")
+    parser.add_argument("--comment-initials", help="修改批注人缩写（如 'ZS'）")
+    
+    # 修订时间
+    parser.add_argument("--rev-date", help="将所有修订时间固定为此时间 (如 '2026-10-18 09:00:00')")
+    parser.add_argument("--rev-start", help="仿真修订起始时间 (如 '2026-10-18 09:00:00')")
+    parser.add_argument("--rev-end", help="仿真修订截止时间 (如 '2026-10-18 11:30:00')，将在区间内平滑自然递增")
+
+    args = parser.parse_args()
+
+    # 如果未提供文件，进入交互提示
+    if not args.file:
+        print("=" * 65)
+        print(" 📝 Word (.docx) 元数据与修订痕迹清洗工具")
+        print(f" 🔗 Project: {WATERMARK_URL}")
+        print("=" * 65)
+        file_input = input("请输入要处理的 docx 文件路径: ").strip(' "\'')
+        if not file_input:
+            print("已取消。")
+            return
+        args.file = file_input
+
+        mode = input("请选择模式: [1] 侦测查看元数据  [2] 一键修改属性与修订: ").strip()
+        if mode == "1":
+            args.inspect = True
+        else:
+            print("\n--- 请输入要修改的字段 (直接回车表示不修改) ---")
+            args.author = input("文档作者 (Creator): ").strip() or None
+            args.modifier = input("上次保存者 (Last Modified By): ").strip() or None
+            args.rev_author = input("修订痕迹修改人 (Track Changes Author): ").strip() or None
+            total_t = input("编辑时间总计 (分钟数，如 120): ").strip()
+            args.total_time = int(total_t) if total_t else None
+            rev_n = input("修订号 (如 2): ").strip()
+            args.rev_num = int(rev_n) if rev_n else None
+            args.modified = input("修改时间 (如 2026-10-18 10:00:00): ").strip() or None
+
+    if args.inspect:
+        inspect_docx(args.file)
+        return
+
+    modify_docx_metadata(
+        input_path=args.file,
+        output_path=args.output,
+        creator=args.author,
+        last_modified_by=args.modifier,
+        revision_num=args.rev_num,
+        created_time=args.created,
+        modified_time=args.modified,
+        printed_time=args.printed,
+        title=args.title,
+        total_time_minutes=args.total_time,
+        company=args.company,
+        target_old_rev_author=args.old_author,
+        new_rev_author=args.rev_author,
+        new_comment_author=args.comment_author,
+        new_comment_initials=args.comment_initials,
+        fixed_rev_date=args.rev_date,
+        rev_date_start=args.rev_start,
+        rev_date_end=args.rev_end,
+    )
+
+if __name__ == "__main__":
+    main()
