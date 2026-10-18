@@ -441,7 +441,7 @@ HTML_TEMPLATE = r"""
             <!-- 一键消除破绽预设 -->
             <div class="preset-bar">
                 <div class="preset-desc">
-                    <strong>💡 快捷优化：</strong>一键抹除 python 脚本备注、平抑异常时长、重置版本号
+                    <strong>💡 快捷优化：</strong>读取本机时间，一键生成最近一个月自然时间线（30天前创建、最近一周修订、今天完稿），并抹除脚本备注
                 </div>
                 <button type="button" class="btn-preset" id="btn-quick-fill">⚡ 填入合理推荐值</button>
             </div>
@@ -593,16 +593,47 @@ HTML_TEMPLATE = r"""
         }
     });
 
+    function formatLocalDateToInput(d) {
+        if (!d) return '';
+        const pad = (n) => String(n).padStart(2, '0');
+        return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    }
+
     function toLocalInputFormat(w3cStr) {
         if (!w3cStr) return '';
         try {
             const d = new Date(w3cStr);
             if (isNaN(d.getTime())) return '';
-            const pad = (n) => String(n).padStart(2, '0');
-            return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+            return formatLocalDateToInput(d);
         } catch {
             return '';
         }
+    }
+
+    // 根据本机当前时间，动态生成最近一个月的合理自然时间线
+    function getRecentMonthDates() {
+        const now = new Date();
+
+        // 1. 创建时间：正好 1 个月前（30天前，上午 09:30 左右）
+        const created = new Date(now.getTime() - 30 * 24 * 3600 * 1000);
+        created.setHours(9, 30, 0, 0);
+
+        // 2. 修订起始时间：约 7 天前上午 10:15（在此 1 个月修订审阅周期内）
+        const revStart = new Date(now.getTime() - 7 * 24 * 3600 * 1000);
+        revStart.setHours(10, 15, 0, 0);
+
+        // 3. 修订截止时间：当前时间前 1 小时 15 分钟（临近完稿）
+        const revEnd = new Date(now.getTime() - (75 * 60 * 1000));
+
+        // 4. 最终修改时间：当前时间前约 40 分钟（今天最新定稿）
+        const modified = new Date(now.getTime() - (40 * 60 * 1000));
+
+        return {
+            created: formatLocalDateToInput(created),
+            modified: formatLocalDateToInput(modified),
+            revStart: formatLocalDateToInput(revStart),
+            revEnd: formatLocalDateToInput(revEnd)
+        };
     }
 
     function showToast(msg) {
@@ -714,8 +745,29 @@ HTML_TEMPLATE = r"""
         document.getElementById('input-total-time').value = '120';
         document.getElementById('input-title').value = info.title || '';
 
-        document.getElementById('input-created').value = toLocalInputFormat(info.created);
-        document.getElementById('input-modified').value = toLocalInputFormat(info.modified);
+        // 默认按本机时间预置最近一个月时间线
+        const recentDates = getRecentMonthDates();
+        let useRecent = false;
+        if (!info.created) {
+            useRecent = true;
+        } else {
+            const origDate = new Date(info.created);
+            if (isNaN(origDate.getTime()) || (new Date() - origDate) > 60 * 24 * 3600 * 1000) {
+                useRecent = true;
+            }
+        }
+
+        if (useRecent) {
+            document.getElementById('input-created').value = recentDates.created;
+            document.getElementById('input-modified').value = recentDates.modified;
+            document.getElementById('input-rev-start').value = recentDates.revStart;
+            document.getElementById('input-rev-end').value = recentDates.revEnd;
+        } else {
+            document.getElementById('input-created').value = toLocalInputFormat(info.created);
+            document.getElementById('input-modified').value = toLocalInputFormat(info.modified);
+            document.getElementById('input-rev-start').value = recentDates.revStart;
+            document.getElementById('input-rev-end').value = recentDates.revEnd;
+        }
 
         if (info.rev_authors && info.rev_authors.length > 0) {
             document.getElementById('input-rev-author').value = info.creator || info.rev_authors[0];
@@ -725,13 +777,6 @@ HTML_TEMPLATE = r"""
 
         if (info.comment_authors && info.comment_authors.length > 0) {
             document.getElementById('input-comment-author').value = info.comment_authors[0];
-        }
-
-        if (info.modified) {
-            const modDate = new Date(info.modified);
-            const startDate = new Date(modDate.getTime() - 2.5 * 3600 * 1000);
-            document.getElementById('input-rev-start').value = toLocalInputFormat(startDate.toISOString());
-            document.getElementById('input-rev-end').value = toLocalInputFormat(modDate.toISOString());
         }
     }
 
@@ -754,10 +799,18 @@ HTML_TEMPLATE = r"""
         document.getElementById('input-comment-author').value = targetName;
         document.getElementById('input-total-time').value = '135';
         document.getElementById('input-rev-num').value = '3';
+
+        // 重新基于本机当前时间动态计算最近一个月自然时间线
+        const recentDates = getRecentMonthDates();
+        document.getElementById('input-created').value = recentDates.created;
+        document.getElementById('input-modified').value = recentDates.modified;
+        document.getElementById('input-rev-start').value = recentDates.revStart;
+        document.getElementById('input-rev-end').value = recentDates.revEnd;
+
         modeSelect.value = 'range';
         groupFixed.style.display = 'none';
         groupRange.style.display = 'grid';
-        showToast('已一键填入推荐值并清空脚本备注！');
+        showToast('已一键生成最近一个月自然时间线（30天前创建，最近修订，今天定稿）！');
     });
 
     document.getElementById('btn-submit').addEventListener('click', async () => {

@@ -486,6 +486,7 @@ def main():
     parser.add_argument("--comment-initials", help="修改批注人缩写（如 'ZS'）")
     
     # 修订时间
+    parser.add_argument("--recent-month", action="store_true", help="读取本机时间，自动将创建时间设为 1 个月前，修改时间设为今天，修订区间设为最近一周")
     parser.add_argument("--rev-date", help="将所有修订时间固定为此时间 (如 '2026-10-18 09:00:00')")
     parser.add_argument("--rev-start", help="仿真修订起始时间 (如 '2026-10-18 09:00:00')")
     parser.add_argument("--rev-end", help="仿真修订截止时间 (如 '2026-10-18 11:30:00')，将在区间内平滑自然递增")
@@ -516,11 +517,27 @@ def main():
             args.total_time = int(total_t) if total_t else None
             rev_n = input("修订号 (如 2): ").strip()
             args.rev_num = int(rev_n) if rev_n else None
-            args.modified = input("修改时间 (如 2026-10-18 10:00:00): ").strip() or None
+            
+            use_recent = input("是否根据本机时间自动设定最近一个月时间线（30天前创建，最近修订，今天定稿）？[Y/n]: ").strip().lower()
+            if use_recent in ("", "y", "yes"):
+                args.recent_month = True
+            else:
+                args.modified = input("修改时间 (如 2026-10-18 10:00:00): ").strip() or None
 
     if args.inspect:
         inspect_docx(args.file)
         return
+
+    if args.recent_month:
+        now = datetime.now()
+        if not args.created:
+            args.created = (now - timedelta(days=30)).replace(hour=9, minute=30, second=0).strftime("%Y-%m-%d %H:%M:%S")
+        if not args.modified:
+            args.modified = (now - timedelta(minutes=40)).strftime("%Y-%m-%d %H:%M:%S")
+        if not args.rev_start:
+            args.rev_start = (now - timedelta(days=7)).replace(hour=10, minute=15, second=0).strftime("%Y-%m-%d %H:%M:%S")
+        if not args.rev_end:
+            args.rev_end = (now - timedelta(hours=1, minutes=15)).strftime("%Y-%m-%d %H:%M:%S")
 
     modify_docx_metadata(
         input_path=args.file,

@@ -115,6 +115,7 @@ python3 docx_metadata_editor.py your_document.docx \
 | `--rev-num` | 修订版本号 | `--rev-num 2` |
 | `--created` | 文档创建时间 | `--created "2026-10-15 08:00:00"` |
 | `--modified` | 最后修改时间 | `--modified "2026-10-18 10:30:00"` |
+| `--recent-month` | 读取本机时间，自动将创建时间设为 1 个月前，修改设为今天，修订区间设为最近一周 | `--recent-month` |
 | `--rev-date` | 将所有修订时间统一为固定时间 | `--rev-date "2026-10-18 09:00:00"` |
 | `--rev-start` / `--rev-end` | 修订时间区间（自然平滑仿真递增） | `--rev-start "..." --rev-end "..."` |
 
